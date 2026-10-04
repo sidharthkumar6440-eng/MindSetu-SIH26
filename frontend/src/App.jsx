@@ -17,7 +17,7 @@ import { AppointmentsScreen } from "./components/screens/AppointmentsScreen";
 import { ConsultationScreen } from "./components/screens/ConsultationScreen";
 import { BookingConfirmationModal } from "./components/screens/BookingConfirmationModal";
 import { PreCallCheckModal } from "./components/screens/PreCallCheckModal";
-import { api } from "./services/api";
+import { api, calculateLocalTriage } from "./services/api";
 
 const SESSION_STORAGE_KEY = "mindsetu_session_id";
 
@@ -165,20 +165,43 @@ export default function App() {
     setError("");
   }
 
-  async function handleStartSession(contextData) {
+  async function handleStartSession(contextData, useFallback = false) {
     setError("");
     setLoading(true);
     setLoadingLabel("Creating protected session…");
-    setRole(contextData.role);
-    setUnit(contextData.unit);
+    if (contextData?.role) setRole(contextData.role);
+    if (contextData?.unit !== undefined) setUnit(contextData.unit);
+
+    let safetyTimer = null;
     try {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      const res = await api.createSession(true);
+      sessionStorage.removeItem("mindsetu_is_fallback_session");
+
+      // Hard safety timer to guarantee loading screen never hangs indefinitely
+      const safetyPromise = new Promise((_, reject) => {
+        safetyTimer = setTimeout(() => {
+          reject(new Error("Session creation timed out. You can retry or proceed with an offline protected session."));
+        }, 7000);
+      });
+
+      let res;
+      if (useFallback) {
+        res = api.generateFallbackSession(true);
+      } else {
+        res = await Promise.race([api.createSession(true), safetyPromise]);
+      }
+
+      if (safetyTimer) clearTimeout(safetyTimer);
+
       sessionStorage.setItem(SESSION_STORAGE_KEY, res.session_id);
+      if (res.is_fallback) {
+        sessionStorage.setItem("mindsetu_is_fallback_session", "true");
+      }
       setSessionId(res.session_id);
       setScreen("wellness");
     } catch (err) {
-      setError(err.message);
+      if (safetyTimer) clearTimeout(safetyTimer);
+      setError(err.message || "Failed to create protected session with server.");
     } finally {
       setLoading(false);
     }
@@ -190,7 +213,11 @@ export default function App() {
     setLoading(true);
     setLoadingLabel("Saving wellbeing pulse…");
     try {
-      await api.submitWellness(sessionId, answers);
+      try {
+        await api.submitWellness(sessionId, answers);
+      } catch (backendErr) {
+        console.warn("Backend submission skipped (offline/fallback mode):", backendErr);
+      }
       setScreen("workload");
     } catch (err) {
       setError(err.message);
@@ -205,7 +232,11 @@ export default function App() {
     setLoading(true);
     setLoadingLabel("Saving duty context…");
     try {
-      await api.submitWorkload(sessionId, { role, unit, ...workload });
+      try {
+        await api.submitWorkload(sessionId, { role, unit, ...workload });
+      } catch (backendErr) {
+        console.warn("Backend submission skipped (offline/fallback mode):", backendErr);
+      }
       setScreen("voice");
     } catch (err) {
       setError(err.message);
@@ -220,10 +251,17 @@ export default function App() {
     setLoading(true);
     setLoadingLabel("Generating your multimodal triage analysis…");
     try {
-      const result = await api.runAnalysis(sessionId);
+      let result;
+      try {
+        result = await api.runAnalysis(sessionId);
+      } catch (backendErr) {
+        console.warn("Backend analysis unavailable, using local deterministic engine:", backendErr);
+        result = calculateLocalTriage(answers, { role, unit, ...workload });
+      }
+
       setAnalysis(result);
 
-      // Refresh assessment history
+      // Refresh assessment history if online
       try {
         const histRes = await api.getAssessmentHistory(sessionId);
         setAssessmentHistory(histRes.history || []);

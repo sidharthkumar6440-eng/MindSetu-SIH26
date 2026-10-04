@@ -163,8 +163,49 @@ export function StartScreen({ onStartSession, onCancel, loading, error }) {
           </div>
 
           {activeError && (
-            <div className="error-alert" role="alert">
-              {activeError}
+            <div className="error-alert" role="alert" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              <span>{activeError}</span>
+              {error && (
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "4px" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={handleSubmit}
+                    disabled={loading}
+                    style={{ fontSize: "0.80rem", padding: "6px 12px" }}
+                  >
+                    ↻ Retry Connection
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      if (!role.trim()) {
+                        setLocalError("Please enter a role or designation.");
+                        return;
+                      }
+                      if (!consent) {
+                        setLocalError("Consent is required to begin.");
+                        return;
+                      }
+                      setLocalError("");
+                      onStartSession(
+                        {
+                          branch,
+                          environment,
+                          role: role.trim(),
+                          unit: unit.trim(),
+                        },
+                        true
+                      );
+                    }}
+                    disabled={loading}
+                    style={{ fontSize: "0.80rem", padding: "6px 12px" }}
+                  >
+                    ✦ Continue with Offline Protected Session
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

@@ -6,6 +6,87 @@
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const DEFAULT_TIMEOUT_MS = 20000;
+const SESSION_TIMEOUT_MS = 6000;
+
+function createUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
+ * Deterministic client-side welfare triage calculation matching SIH26186 engine (AGENTS.md).
+ * Used when backend triage endpoint is unreachable.
+ */
+export function calculateLocalTriage(answers, workload) {
+  const safeAnswers = Array.isArray(answers) && answers.length === 6 ? answers : [1, 1, 1, 1, 1, 1];
+  const ansSum = safeAnswers.reduce((acc, v) => acc + (typeof v === "number" ? Math.max(0, Math.min(3, v)) : 1), 0);
+  const wellnessScore = Math.round(((ansSum / 18) * 100) * 100) / 100;
+
+  const wl = workload || {};
+  let wlScore = 0;
+  const duty = Number(wl.duty_hours || 8);
+  if (duty > 12) wlScore += 30;
+  else if (duty > 10) wlScore += 20;
+  else if (duty > 8) wlScore += 10;
+  else wlScore += 5;
+
+  const night = Number(wl.night_duties || 0);
+  if (night > 4) wlScore += 20;
+  else if (night > 2) wlScore += 15;
+  else if (night > 0) wlScore += 10;
+
+  const rest = Number(wl.rest_hours || 8);
+  if (rest < 5) wlScore += 20;
+  else if (rest < 6) wlScore += 15;
+  else if (rest < 7) wlScore += 10;
+  else wlScore += 5;
+
+  const leaveGap = Number(wl.days_since_leave || 7);
+  if (leaveGap > 45) wlScore += 15;
+  else if (leaveGap > 30) wlScore += 10;
+  else if (leaveGap > 14) wlScore += 5;
+
+  const level = Math.max(1, Math.min(5, Number(wl.workload_level || 3)));
+  wlScore += level * 2;
+
+  if (Boolean(wl.high_pressure_assignment)) wlScore += 5;
+  const changes = Number(wl.duty_change_frequency || 0);
+  if (changes > 3) wlScore += 5;
+  else if (changes > 0) wlScore += 3;
+
+  const workloadScore = Math.min(100, Math.max(0, wlScore));
+  const combinedScore = Math.round((0.55 * wellnessScore + 0.45 * workloadScore) * 100) / 100;
+
+  let riskLevel = "low";
+  if (combinedScore >= 70 || wellnessScore >= 80 || workloadScore >= 85) {
+    riskLevel = "high";
+  } else if (combinedScore >= 45 || wellnessScore >= 50 || workloadScore >= 60) {
+    riskLevel = "moderate";
+  }
+
+  const recommendations = {
+    high: "High cumulative stress and workload detected. Immediate rest, duty rotation review, and proactive check-in with a designated medical or welfare officer are strongly recommended.",
+    moderate: "Moderate strain indicators observed. Prioritize scheduled recovery, sleep hygiene, and light physical de-escalation routines to prevent persistent exhaustion.",
+    low: "Operational wellbeing indicators remain within stable baseline parameters. Continue scheduled rest breaks, peer engagement, and standard health routines.",
+  };
+
+  return {
+    id: createUUID(),
+    wellness_score: wellnessScore,
+    workload_score: workloadScore,
+    combined_score: combinedScore,
+    risk_level: riskLevel,
+    recommendation: recommendations[riskLevel],
+    created_at: new Date().toISOString(),
+    is_local_fallback: true,
+  };
+}
 
 async function request(endpoint, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -51,7 +132,16 @@ export const api = {
     return request("/api/sessions", {
       method: "POST",
       body: JSON.stringify({ consent_given: consentGiven }),
-    });
+    }, SESSION_TIMEOUT_MS);
+  },
+
+  generateFallbackSession(consentGiven = true) {
+    return {
+      session_id: createUUID(),
+      anonymous: true,
+      consent_given: consentGiven,
+      is_fallback: true,
+    };
   },
 
   // SIH26186 Welfare Workflow
