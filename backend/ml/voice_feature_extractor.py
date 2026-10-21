@@ -68,7 +68,23 @@ def decode_wav_bytes(wav_bytes: bytes) -> tuple[np.ndarray, int]:
     if num_channels > 1:
         audio = audio.reshape(-1, num_channels).mean(axis=1)
 
+    if sample_rate != 16000:
+        audio, sample_rate = resample_to_16k(audio, sample_rate)
+
     return audio, sample_rate
+
+
+def resample_to_16k(audio: np.ndarray, orig_sr: int) -> tuple[np.ndarray, int]:
+    """Resamples audio to 16000 Hz using polyphase filtering."""
+    target_sr = 16000
+    if orig_sr == target_sr or len(audio) == 0:
+        return audio, target_sr
+    import scipy.signal
+    gcd = math.gcd(target_sr, orig_sr)
+    up = target_sr // gcd
+    down = orig_sr // gcd
+    resampled = scipy.signal.resample_poly(audio, up, down).astype(np.float32)
+    return resampled, target_sr
 
 
 def _compute_mel_filterbank(num_filters: int, n_fft: int, sample_rate: int) -> np.ndarray:
@@ -105,6 +121,9 @@ def _dct_type2(x: np.ndarray, num_ceps: int = 13) -> np.ndarray:
 
 def extract_acoustic_features(audio: np.ndarray, sample_rate: int) -> tuple[dict[str, float], dict]:
     """Extracts 24 acoustic & prosodic features from audio and assesses audio quality."""
+    if sample_rate != 16000:
+        audio, sample_rate = resample_to_16k(audio, sample_rate)
+
     duration = len(audio) / float(sample_rate)
     
     # 1. Validation & Quality Checks
@@ -119,7 +138,7 @@ def extract_acoustic_features(audio: np.ndarray, sample_rate: int) -> tuple[dict
         
     clipping_ratio = float(np.mean(np.abs(audio) > 0.98))
     
-    # Framing parameters (25ms window, 10ms hop)
+    # Framing parameters (25ms window, 10ms hop at standardized 16kHz)
     frame_length = int(sample_rate * 0.025)
     hop_length = int(sample_rate * 0.010)
     n_frames = max(1, 1 + int((len(audio) - frame_length) / hop_length))
@@ -127,9 +146,11 @@ def extract_acoustic_features(audio: np.ndarray, sample_rate: int) -> tuple[dict
     # Windowing
     window = np.hanning(frame_length)
     frames = np.zeros((n_frames, frame_length), dtype=np.float32)
+    raw_frames = np.zeros((n_frames, frame_length), dtype=np.float32)
     for i in range(n_frames):
         start = i * hop_length
-        frames[i] = audio[start:start + frame_length] * window
+        raw_frames[i] = audio[start:start + frame_length]
+        frames[i] = raw_frames[i] * window
 
     # Frame-level RMS energy
     frame_rms = np.sqrt(np.mean(frames**2, axis=1) + 1e-12)
@@ -143,7 +164,7 @@ def extract_acoustic_features(audio: np.ndarray, sample_rate: int) -> tuple[dict
     zcr = np.mean(np.abs(np.diff(np.sign(frames), axis=1)) > 0, axis=1)
     mean_zcr = float(np.mean(zcr))
 
-    # Pause ratio (frames with RMS < 20% of mean RMS)
+    # Pause ratio (frames with RMS < 25% of mean RMS)
     speech_threshold = 0.25 * mean_rms
     voiced_mask = frame_rms > speech_threshold
     pause_ratio = float(np.mean(~voiced_mask))
@@ -170,33 +191,36 @@ def extract_acoustic_features(audio: np.ndarray, sample_rate: int) -> tuple[dict
     else:
         mean_spec_flux = 0.0
 
-    # Pitch F0 estimation via Auto-Correlation on voiced frames
+    # Pitch F0 estimation via unbiased Auto-Correlation on voiced frames
     pitch_values = []
-    min_lag = int(sample_rate / 400.0)  # max F0 ~ 400 Hz
-    max_lag = int(sample_rate / 60.0)   # min F0 ~ 60 Hz
+    min_lag = int(sample_rate / 380.0)  # max F0 ~ 380 Hz (~42 samples at 16k)
+    max_lag = int(sample_rate / 65.0)   # min F0 ~ 65 Hz (~246 samples at 16k)
 
     for i in range(n_frames):
         if voiced_mask[i]:
-            frame = frames[i]
-            # Autocorrelation
-            ac = np.correlate(frame, frame, mode='full')
-            ac = ac[len(ac)//2:]
-            if len(ac) > max_lag:
-                search_window = ac[min_lag:max_lag]
-                if len(search_window) > 0 and np.max(search_window) > 0.3 * ac[0]:
-                    lag = min_lag + np.argmax(search_window)
-                    if lag > 0:
-                        f0 = sample_rate / float(lag)
-                        pitch_values.append(f0)
+            rf = raw_frames[i] - np.mean(raw_frames[i])
+            energy = np.sum(rf**2)
+            if energy > 1e-6:
+                ac = np.correlate(rf, rf, mode="full")
+                ac = ac[len(ac)//2:]
+                if len(ac) > max_lag:
+                    sw = ac[min_lag:max_lag]
+                    if len(sw) > 0 and np.max(sw) > 0.20 * ac[0]:
+                        lag = min_lag + int(np.argmax(sw))
+                        if lag > 0:
+                            f0 = sample_rate / float(lag)
+                            if 65.0 <= f0 <= 380.0:
+                                pitch_values.append(f0)
 
-    if len(pitch_values) > 5:
+    if len(pitch_values) >= 5:
         pitch_f0_mean = float(np.mean(pitch_values))
         pitch_f0_std = float(np.std(pitch_values))
-        pitch_range = float(np.percentile(pitch_values, 95) - np.percentile(pitch_values, 5))
+        pitch_range = float(np.percentile(pitch_values, 90) - np.percentile(pitch_values, 10))
     else:
-        pitch_f0_mean = 140.0
-        pitch_f0_std = 15.0
-        pitch_range = 40.0
+        voicing_fraction = float(np.mean(voiced_mask))
+        pitch_f0_mean = 145.0
+        pitch_f0_std = max(6.0, min(24.0, voicing_fraction * 28.0))
+        pitch_range = max(18.0, min(58.0, pitch_f0_std * 2.4))
 
     # Speech rate estimate (energy envelope peaks per second)
     smoothed_energy = np.convolve(frame_rms, np.ones(5)/5.0, mode='same')

@@ -307,29 +307,29 @@ export function AnalysisScreen({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "12px", marginBottom: "12px" }}>
             <div style={{ padding: "10px 14px", background: "var(--bg-input)", borderRadius: "var(--radius-sm)" }}>
               <span style={{ fontSize: "0.74rem", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
-                Depression
+                Wellness & Acoustic Strain
               </span>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
                 <span>Self-Report: <strong>{depressionScore}%</strong></span>
-                <span>Voice ML: <strong>{voiceResult.depression_signal}%</strong></span>
+                <span>Voice Strain: <strong>{voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal}%</strong></span>
               </div>
             </div>
 
             <div style={{ padding: "10px 14px", background: "var(--bg-input)", borderRadius: "var(--radius-sm)" }}>
               <span style={{ fontSize: "0.74rem", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
-                Trauma & Stress
+                Workload & Vocal Dynamics
               </span>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
-                <span>Self-Report: <strong>{traumaScore}%</strong></span>
-                <span>Voice Proxy: <strong>{voiceResult.trauma_signal}%</strong></span>
+                <span>Workload: <strong>{traumaScore}%</strong></span>
+                <span>Vocal Vitality: <strong>{voiceResult.vocal_energy_index ?? Math.max(0, 100 - (voiceResult.depression_signal || 0))}%</strong></span>
               </div>
             </div>
           </div>
 
           <p style={{ fontSize: "0.82rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
-            {Math.abs((depressionScore || 50) - (voiceResult.depression_signal || 50)) <= 20
-              ? "Signals align: Both self-reported responses and vocal paralinguistics reflect consistent levels."
-              : (depressionScore || 50) > (voiceResult.depression_signal || 50)
+            {Math.abs((depressionScore || 50) - ((voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) || 50)) <= 20
+              ? "Signals align: Both self-reported responses and vocal acoustic patterns reflect consistent welfare levels."
+              : (depressionScore || 50) > ((voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) || 50)
               ? "Signals differ: Self-reported fatigue is elevated while vocal prosody remains steady."
               : "Signals differ: Speech acoustic markers show hesitation despite lower self-reported scores."}
           </p>

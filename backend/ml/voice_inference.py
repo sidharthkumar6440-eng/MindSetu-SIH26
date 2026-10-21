@@ -40,36 +40,52 @@ def analyze_voice_recording(wav_bytes: bytes, session_id: str | None = None) -> 
     pipeline = bundle["pipeline"]
     feature_names = bundle["features"]
 
-    # 4. Predict
+    # 4. Predict — raw model probability scaled to Acoustic Strain Index 0–100
     df = pd.DataFrame([[features[f] for f in feature_names]], columns=feature_names)
-    prob_depressed = float(pipeline.predict_proba(df)[0, 1])
-    depression_signal = round(prob_depressed * 100.0, 1)
+    raw_prob = float(pipeline.predict_proba(df)[0, 1])
+    acoustic_strain_signal = round(raw_prob * 100.0, 1)
 
-    # Experimental stress/trauma acoustic proxy (based on pitch variability, spectral flux, and energy distribution)
-    # Scaled to 0-100 and explicitly marked as experimental
-    f0_std = features.get("pitch_f0_std", 15.0)
+    # Keep legacy keys for backwards compatibility with frontend and tests
+    depression_signal = acoustic_strain_signal
+
+    # 5. Vocal Energy & Dynamic Range Index — multi-feature composite
+    # Combines pitch variability, speech cadence, and spectral energy for a separate dynamic signal
+    pitch_std = features.get("pitch_f0_std", 15.0)
+    pitch_rng = features.get("pitch_range", 40.0)
+    speech_rate = features.get("speech_rate_estimate", 3.0)
+    rms = features.get("rms_energy", 0.06)
     spec_flux = features.get("spectral_flux", 0.05)
-    trauma_proxy_prob = min(1.0, max(0.0, (prob_depressed * 0.6) + (min(spec_flux * 10.0, 0.4))))
-    trauma_signal = round(trauma_proxy_prob * 100.0, 1)
 
-    # 5. Top Acoustic Contributors / Explainability
+    # Higher values → more dynamic/resilient; lower → strained/fatigued
+    norm_pitch_std = min(1.0, max(0.0, (pitch_std - 5.0) / 35.0))     # 5–40 Hz → 0–1
+    norm_pitch_rng = min(1.0, max(0.0, (pitch_rng - 10.0) / 65.0))    # 10–75 Hz → 0–1
+    norm_rate      = min(1.0, max(0.0, (speech_rate - 1.5) / 4.0))    # 1.5–5.5 → 0–1
+    norm_rms       = min(1.0, max(0.0, (rms - 0.02) / 0.12))          # 0.02–0.14 → 0–1
+    norm_flux      = min(1.0, max(0.0, (spec_flux - 0.02) / 0.07))    # 0.02–0.09 → 0–1
+    vocal_energy_composite = (norm_pitch_std * 0.30 + norm_pitch_rng * 0.25 +
+                               norm_rate * 0.20 + norm_rms * 0.15 + norm_flux * 0.10)
+    vocal_energy_index = round(vocal_energy_composite * 100.0, 1)
+
+    # Keep legacy key for backwards compatibility
+    trauma_signal = round((1.0 - vocal_energy_composite) * 100.0, 1)
+
+    # 6. Top Acoustic Contributors / Explainability
     clf = pipeline.named_steps["classifier"]
     scaler = pipeline.named_steps["scaler"]
     importances = clf.feature_importances_
-    
-    # Calculate standardized deviation from population baseline
+
     x_scaled = scaler.transform(df)[0]
     contributors = []
-    
+
     friendly_labels = {
         "pitch_range": "Dynamic Pitch Range",
         "pitch_f0_std": "Pitch Variability (Monotone vs Animated)",
         "pause_ratio": "Hesitation & Pause Proportion",
         "speech_rate_estimate": "Speech Cadence & Rate",
-        "spectral_flux": "Spectral Rapid Modulation",
+        "spectral_flux": "Spectral Modulation",
         "rms_energy": "Acoustic Vocal Energy",
         "spectral_centroid": "Vocal Tract Brightness",
-        "energy_entropy": "Energy Entropy",
+        "energy_entropy": "Energy Distribution",
         "zero_crossing_rate": "Voicing Articulation",
     }
 
@@ -90,32 +106,53 @@ def analyze_voice_recording(wav_bytes: bytes, session_id: str | None = None) -> 
 
     contributors = sorted(contributors, key=lambda c: c["impact_magnitude"], reverse=True)[:5]
 
-    # 6. Confidence Score based on audio quality & duration
+    # 7. Confidence Score based on audio quality & duration
     duration = diagnostics["duration_seconds"]
     quality = diagnostics["quality"]
-    margin = abs(prob_depressed - 0.5) * 2.0  # 0.0 to 1.0
-    
-    if quality == "good" and duration >= 5.0:
-        confidence = round(min(0.95, 0.70 + margin * 0.25), 2)
-    elif quality == "moderate":
-        confidence = round(min(0.80, 0.55 + margin * 0.25), 2)
-    else:
-        confidence = round(min(0.60, 0.40 + margin * 0.20), 2)
+    margin = abs(raw_prob - 0.5) * 2.0  # 0.0 to 1.0
 
-    # 7. Non-Clinical Signal Interpretation
-    if depression_signal >= 70.0:
-        interpretation = "Voice acoustic patterns exhibit constrained pitch variability, higher hesitation intervals, and subdued vocal energy, consistent with elevated psychomotor strain."
-    elif depression_signal >= 45.0:
-        interpretation = "Voice acoustic patterns indicate moderate paralinguistic strain with noticeable pitch flattening."
+    if quality == "good" and duration >= 5.0:
+        confidence = round(min(0.92, 0.65 + margin * 0.27), 2)
+    elif quality == "moderate":
+        confidence = round(min(0.78, 0.50 + margin * 0.28), 2)
     else:
-        interpretation = "Voice acoustic patterns reflect steady pitch modulation, normative speech cadence, and dynamic vocal energy."
+        confidence = round(min(0.58, 0.38 + margin * 0.20), 2)
+
+    # 8. Welfare-Appropriate Signal Interpretation (non-clinical)
+    if acoustic_strain_signal >= 70.0:
+        strain_band = "elevated"
+        interpretation = (
+            f"Acoustic analysis detected constrained pitch modulation ({features.get('pitch_f0_std', 0):.1f} Hz std), "
+            f"elevated pause proportion ({features.get('pause_ratio', 0)*100:.0f}%), "
+            f"and reduced speech cadence ({features.get('speech_rate_estimate', 0):.1f} peaks/s). "
+            "These vocal signals suggest the speaker may benefit from rest or a welfare check-in."
+        )
+    elif acoustic_strain_signal >= 45.0:
+        strain_band = "moderate"
+        interpretation = (
+            f"Speech shows moderate pitch variation ({features.get('pitch_f0_std', 0):.1f} Hz std) "
+            f"with a pause ratio of {features.get('pause_ratio', 0)*100:.0f}%. "
+            "Some acoustic strain indicators are present — consider monitoring workload and rest patterns."
+        )
+    else:
+        strain_band = "low"
+        interpretation = (
+            f"Speech reflects active pitch modulation ({features.get('pitch_f0_std', 0):.1f} Hz std) "
+            f"and a healthy speech cadence ({features.get('speech_rate_estimate', 0):.1f} peaks/s). "
+            "Vocal acoustic patterns indicate baseline engagement and vocal energy."
+        )
 
     return {
         "status": "success",
         "session_id": session_id,
-        "depression_signal": depression_signal,
+        # Primary welfare signal (non-clinical)
+        "acoustic_strain_signal": acoustic_strain_signal,
+        "strain_band": strain_band,
+        "vocal_energy_index": vocal_energy_index,
+        # Legacy keys kept for frontend backward compatibility
+        "depression_signal": acoustic_strain_signal,
         "trauma_signal": trauma_signal,
-        "trauma_status": "experimental_proxy",
+        "trauma_status": "vocal_energy_composite",
         "confidence": confidence,
         "audio_quality": quality,
         "diagnostics": diagnostics,
@@ -124,7 +161,7 @@ def analyze_voice_recording(wav_bytes: bytes, session_id: str | None = None) -> 
         "signal_interpretation": interpretation,
         "model_version": bundle.get("model_version", "1.0.0-voice-gbdt"),
         "clinical_diagnosis": False,
-        "notice": "Voice signals provide additional research-oriented decision support and do not independently establish a psychiatric diagnosis."
+        "notice": "This voice analysis provides acoustic welfare signals only. It does not constitute a clinical diagnosis or a personnel decision."
     }
 
 

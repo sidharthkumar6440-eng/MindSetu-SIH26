@@ -189,20 +189,31 @@ export function VoiceScreen({
 
     try {
       let finalBlob = blob;
-      // Convert to standard WAV using Web Audio API if needed
-      if (!blob.type || !blob.type.includes("wav")) {
-        try {
-          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-          if (AudioContextClass) {
-            const audioCtx = new AudioContextClass();
-            const arrayBuffer = await blob.arrayBuffer();
-            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-            finalBlob = audioBufferToWav(audioBuffer);
-            await audioCtx.close();
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        const OfflineContextClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          const arrayBuffer = await blob.arrayBuffer();
+          const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+          await audioCtx.close();
+
+          if (OfflineContextClass) {
+            const targetSampleRate = 16000;
+            const targetLength = Math.max(1, Math.round(decoded.duration * targetSampleRate));
+            const offlineCtx = new OfflineContextClass(1, targetLength, targetSampleRate);
+            const source = offlineCtx.createBufferSource();
+            source.buffer = decoded;
+            source.connect(offlineCtx.destination);
+            source.start(0);
+            const resampledBuffer = await offlineCtx.startRendering();
+            finalBlob = audioBufferToWav(resampledBuffer);
+          } else {
+            finalBlob = audioBufferToWav(decoded);
           }
-        } catch (convErr) {
-          console.warn("AudioContext WAV conversion fallback:", convErr);
         }
+      } catch (convErr) {
+        console.warn("Native Web Audio 16kHz resampling fallback:", convErr);
       }
 
       const reader = new FileReader();
@@ -653,10 +664,34 @@ export function VoiceScreen({
         {voiceResult && recorderState !== "recording" && recorderState !== "processing" && (
           <section className="voice-result-container" aria-label="Voice Analysis Results">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-              <strong style={{ fontSize: "0.88rem", color: "var(--text-primary)" }}>
-                Objective Acoustic Signals
-              </strong>
-              <span className="badge" style={{ fontSize: "0.72rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <strong style={{ fontSize: "0.88rem", color: "var(--text-primary)" }}>
+                  Acoustic Welfare Signals
+                </strong>
+                <span
+                  className="badge"
+                  style={{
+                    fontSize: "0.70rem",
+                    backgroundColor:
+                      (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 70
+                        ? "rgba(239, 68, 68, 0.15)"
+                        : (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 45
+                        ? "rgba(245, 158, 11, 0.15)"
+                        : "rgba(16, 185, 129, 0.15)",
+                    color:
+                      (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 70
+                        ? "#ef4444"
+                        : (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 45
+                        ? "#f59e0b"
+                        : "#10b981",
+                  }}
+                >
+                  {(voiceResult.strain_band
+                    ? `${voiceResult.strain_band.toUpperCase()} STRAIN`
+                    : (voiceResult.depression_signal >= 70 ? "ELEVATED STRAIN" : voiceResult.depression_signal >= 45 ? "MODERATE STRAIN" : "LOW STRAIN"))}
+                </span>
+              </div>
+              <span className="badge" style={{ fontSize: "0.70rem" }}>
                 Quality: {voiceResult.audio_quality?.toUpperCase()}
               </span>
             </div>
@@ -664,23 +699,28 @@ export function VoiceScreen({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "10px" }}>
               <div style={{ padding: "10px 12px", background: "var(--bg-surface)", borderRadius: "var(--radius-sm)" }}>
                 <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", display: "block" }}>
-                  Depression Signal
+                  Acoustic Strain Index
                 </span>
                 <strong
                   style={{
                     fontSize: "1.25rem",
-                    color: voiceResult.depression_signal >= 70 ? "#ef4444" : "#10b981",
+                    color:
+                      (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 70
+                        ? "#ef4444"
+                        : (voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal) >= 45
+                        ? "#f59e0b"
+                        : "#10b981",
                   }}
                 >
-                  {voiceResult.depression_signal}%
+                  {voiceResult.acoustic_strain_signal ?? voiceResult.depression_signal}%
                 </strong>
               </div>
               <div style={{ padding: "10px 12px", background: "var(--bg-surface)", borderRadius: "var(--radius-sm)" }}>
                 <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", display: "block" }}>
-                  Acoustic Stress
+                  Vocal Energy & Cadence
                 </span>
                 <strong style={{ fontSize: "1.25rem", color: "var(--primary)" }}>
-                  {voiceResult.trauma_signal}%
+                  {voiceResult.vocal_energy_index ?? Math.max(0, 100 - (voiceResult.depression_signal || 0))}%
                 </strong>
               </div>
             </div>
@@ -688,6 +728,26 @@ export function VoiceScreen({
             <p style={{ fontSize: "0.82rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}>
               {voiceResult.signal_interpretation}
             </p>
+
+            {voiceResult.top_acoustic_contributors && voiceResult.top_acoustic_contributors.length > 0 && (
+              <div style={{ marginTop: "10px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                {voiceResult.top_acoustic_contributors.slice(0, 3).map((c, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      fontSize: "0.70rem",
+                      padding: "2px 8px",
+                      borderRadius: "10px",
+                      background: "var(--bg-card)",
+                      color: "var(--text-muted)",
+                      border: "1px solid var(--border-light)",
+                    }}
+                  >
+                    {c.label}: {typeof c.measured_value === "number" ? c.measured_value.toFixed(1) : c.measured_value}
+                  </span>
+                ))}
+              </div>
+            )}
           </section>
         )}
 

@@ -39,37 +39,38 @@ def generate_paralinguistic_training_corpus(n_samples: int = 600, random_seed: i
     data = {}
     for feat in ACOUSTIC_FEATURE_NAMES:
         if feat == "rms_energy":
-            # Depressive speech often has lower or more subdued amplitude
-            data[feat] = np.where(y == 1, np.random.normal(0.045, 0.015, n_samples), np.random.normal(0.075, 0.020, n_samples))
+            # Vocal strain / fatigue often presents with reduced vocal projection or subdued dynamics
+            data[feat] = np.where(y == 1, np.random.normal(0.045, 0.015, n_samples), np.random.normal(0.070, 0.020, n_samples))
         elif feat == "energy_entropy":
-            data[feat] = np.where(y == 1, np.random.normal(4.2, 0.4, n_samples), np.random.normal(4.8, 0.5, n_samples))
+            data[feat] = np.where(y == 1, np.random.normal(4.3, 0.4, n_samples), np.random.normal(4.7, 0.4, n_samples))
         elif feat == "zero_crossing_rate":
-            data[feat] = np.where(y == 1, np.random.normal(0.08, 0.02, n_samples), np.random.normal(0.11, 0.03, n_samples))
+            data[feat] = np.where(y == 1, np.random.normal(0.085, 0.02, n_samples), np.random.normal(0.105, 0.025, n_samples))
         elif feat == "spectral_centroid":
-            # Dampened high-frequency energy in psychomotor retardation
-            data[feat] = np.where(y == 1, np.random.normal(1450.0, 200.0, n_samples), np.random.normal(1850.0, 250.0, n_samples))
+            # Subdued high-frequency acoustic energy under psychomotor fatigue
+            data[feat] = np.where(y == 1, np.random.normal(1550.0, 200.0, n_samples), np.random.normal(1800.0, 220.0, n_samples))
         elif feat == "spectral_spread":
-            data[feat] = np.where(y == 1, np.random.normal(1100.0, 180.0, n_samples), np.random.normal(1350.0, 200.0, n_samples))
+            data[feat] = np.where(y == 1, np.random.normal(1180.0, 160.0, n_samples), np.random.normal(1340.0, 180.0, n_samples))
         elif feat == "spectral_flux":
-            data[feat] = np.where(y == 1, np.random.normal(0.045, 0.012, n_samples), np.random.normal(0.068, 0.015, n_samples))
+            data[feat] = np.where(y == 1, np.random.normal(0.046, 0.012, n_samples), np.random.normal(0.065, 0.014, n_samples))
         elif feat == "pitch_f0_mean":
-            # Pitch mean varies by individual, slightly lower or constrained in depressive states
-            data[feat] = np.where(y == 1, np.random.normal(132.0, 22.0, n_samples), np.random.normal(148.0, 25.0, n_samples))
+            # Pitch mean varies by individual speaker anatomy
+            data[feat] = np.where(y == 1, np.random.normal(136.0, 20.0, n_samples), np.random.normal(146.0, 22.0, n_samples))
         elif feat == "pitch_f0_std":
-            # Reduced pitch variability / monotone speech is a classic clinical marker
-            data[feat] = np.where(y == 1, np.random.normal(8.5, 3.0, n_samples), np.random.normal(22.0, 6.5, n_samples))
+            # Constrained pitch modulation (monotone vs animated)
+            data[feat] = np.where(y == 1, np.random.normal(10.5, 3.5, n_samples), np.random.normal(18.5, 5.0, n_samples))
         elif feat == "pitch_range":
-            data[feat] = np.where(y == 1, np.random.normal(28.0, 8.0, n_samples), np.random.normal(65.0, 15.0, n_samples))
+            # Dynamic vocal inflection span
+            data[feat] = np.where(y == 1, np.random.normal(32.0, 10.0, n_samples), np.random.normal(55.0, 14.0, n_samples))
         elif feat == "pause_ratio":
-            # Higher pause proportion / hesitations
-            data[feat] = np.where(y == 1, np.random.normal(0.42, 0.08, n_samples), np.random.normal(0.24, 0.06, n_samples))
+            # Higher hesitation / pause ratio
+            data[feat] = np.where(y == 1, np.random.normal(0.38, 0.08, n_samples), np.random.normal(0.24, 0.06, n_samples))
         elif feat == "speech_rate_estimate":
-            # Slower syllable cadence
-            data[feat] = np.where(y == 1, np.random.normal(2.6, 0.5, n_samples), np.random.normal(3.9, 0.6, n_samples))
+            # Slower syllable cadence under fatigue
+            data[feat] = np.where(y == 1, np.random.normal(2.8, 0.6, n_samples), np.random.normal(3.8, 0.6, n_samples))
         elif feat.startswith("mfcc_"):
             idx = int(feat.split("_")[1])
             mean_val = -10.0 + idx * 1.5 if idx % 2 == 0 else 5.0 - idx * 0.8
-            shift = 2.5 if y.all() else 0.0
+            shift = 1.8 if y.all() else 0.0
             data[feat] = np.where(y == 1, np.random.normal(mean_val + shift, 3.0, n_samples), np.random.normal(mean_val, 3.0, n_samples))
         else:
             data[feat] = np.random.normal(0.0, 1.0, n_samples)
@@ -78,6 +79,7 @@ def generate_paralinguistic_training_corpus(n_samples: int = 600, random_seed: i
     # Clip any non-physical acoustic metrics
     df["pause_ratio"] = df["pause_ratio"].clip(0.05, 0.85)
     df["pitch_f0_std"] = df["pitch_f0_std"].clip(2.0, 50.0)
+    df["pitch_range"] = df["pitch_range"].clip(8.0, 95.0)
     df["rms_energy"] = df["rms_energy"].clip(0.005, 0.25)
     df["speech_rate_estimate"] = df["speech_rate_estimate"].clip(1.0, 7.0)
 
@@ -89,7 +91,7 @@ def train_and_evaluate_voice_model():
     print("TRAINING MINDSETU VOICE ML MODEL")
     print("=" * 60)
 
-    X, y = generate_paralinguistic_training_corpus(n_samples=800, random_seed=42)
+    X, y = generate_paralinguistic_training_corpus(n_samples=1000, random_seed=42)
     print(f"Dataset assembled: {X.shape[0]} speech acoustic samples, {X.shape[1]} features.")
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -98,9 +100,11 @@ def train_and_evaluate_voice_model():
         ("scaler", StandardScaler()),
         ("classifier", GradientBoostingClassifier(
             n_estimators=100,
-            learning_rate=0.08,
-            max_depth=4,
+            learning_rate=0.06,
+            max_depth=3,
+            max_features=0.6,
             subsample=0.85,
+            min_samples_leaf=8,
             random_state=42
         ))
     ])
