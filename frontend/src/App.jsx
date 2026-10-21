@@ -17,14 +17,40 @@ import { AppointmentsScreen } from "./components/screens/AppointmentsScreen";
 import { ConsultationScreen } from "./components/screens/ConsultationScreen";
 import { BookingConfirmationModal } from "./components/screens/BookingConfirmationModal";
 import { PreCallCheckModal } from "./components/screens/PreCallCheckModal";
+import { ConsultationProfileScreen } from "./components/screens/ConsultationProfileScreen";
 import { api, calculateLocalTriage } from "./services/api";
 
+
 const SESSION_STORAGE_KEY = "mindsetu_session_id";
+const SCREEN_STORAGE_KEY = "mindsetu_active_screen";
 
 export default function App() {
-  const [screen, setScreen] = useState("home");
+  const [screen, setScreenState] = useState(() => {
+    return sessionStorage.getItem(SCREEN_STORAGE_KEY) || "home";
+  });
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem("mindsetu-theme") === "dark");
   const [sessionId, setSessionId] = useState(null);
+  const [consultationProfile, setConsultationProfile] = useState(() => {
+    try {
+      const savedSid = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (savedSid) {
+        const raw = sessionStorage.getItem(`mindsetu_consultation_profile_${savedSid}`);
+        return raw ? JSON.parse(raw) : null;
+      }
+    } catch {
+      // Fallback
+    }
+    return null;
+  });
+
+  function setScreen(newScreen) {
+    let effectiveScreen = newScreen;
+    if (newScreen === "doctors" && !consultationProfile) {
+      effectiveScreen = "consultation-profile";
+    }
+    setScreenState(effectiveScreen);
+    sessionStorage.setItem(SCREEN_STORAGE_KEY, effectiveScreen);
+  }
 
   // Workflow state
   const [role, setRole] = useState("Field Operations Personnel");
@@ -107,14 +133,17 @@ export default function App() {
           try {
             const dashRes = await api.getDashboard(savedSessionId);
             if (isMounted && dashRes) {
-              setAnalysis(dashRes);
-              setScreen("analysis");
+              const currentSavedScreen = sessionStorage.getItem(SCREEN_STORAGE_KEY) || "home";
+              const isScreeningInProgress = ["start", "wellness", "workload", "voice"].includes(currentSavedScreen);
+
+              // Only restore analysis into active state if not in an incomplete screening flow
+              if (!isScreeningInProgress) {
+                setAnalysis(dashRes);
+              }
             }
           } catch {
-            if (isMounted) setScreen("wellness");
+            // Non-fatal
           }
-        } else {
-          if (isMounted) setScreen("wellness");
         }
 
         // Check if any appointments exist for this session
@@ -130,12 +159,29 @@ export default function App() {
         } catch {
           // Non-fatal
         }
+
+        // Check if consultation profile exists for this session
+        try {
+          const prof = await api.getConsultationProfile(savedSessionId);
+          if (isMounted && prof) {
+            setConsultationProfile(prof);
+            try {
+              sessionStorage.setItem(`mindsetu_consultation_profile_${savedSessionId}`, JSON.stringify(prof));
+            } catch {
+              // Ignore
+            }
+          }
+        } catch {
+          // Non-fatal if no profile exists yet
+        }
       } catch {
         // Stale, malformed, or rejected session ID
         if (isMounted) {
           sessionStorage.removeItem(SESSION_STORAGE_KEY);
+          sessionStorage.removeItem(SCREEN_STORAGE_KEY);
           setSessionId(null);
-          setScreen("home");
+          setConsultationProfile(null);
+          setScreenState("home");
         }
       }
     }
@@ -148,9 +194,14 @@ export default function App() {
 
   // Reset or Start Session
   function handleResetSession() {
+    if (sessionId) {
+      sessionStorage.removeItem(`mindsetu_consultation_profile_${sessionId}`);
+    }
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    setScreen("home");
+    sessionStorage.removeItem(SCREEN_STORAGE_KEY);
+    setScreenState("home");
     setSessionId(null);
+    setConsultationProfile(null);
     setAnswers(Array(6).fill(null));
     setVoiceResult(null);
     setAnalysis(null);
@@ -171,10 +222,14 @@ export default function App() {
     setLoadingLabel("Creating protected session…");
     if (contextData?.role) setRole(contextData.role);
     if (contextData?.unit !== undefined) setUnit(contextData.unit);
+    setAnswers(Array(6).fill(null));
+    setAnalysis(null);
+    setVoiceResult(null);
 
     let safetyTimer = null;
     try {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      sessionStorage.removeItem(SCREEN_STORAGE_KEY);
       sessionStorage.removeItem("mindsetu_is_fallback_session");
 
       // Hard safety timer to guarantee loading screen never hangs indefinitely
@@ -437,12 +492,25 @@ export default function App() {
         <Navigation
           screen={screen}
           setScreen={setScreen}
-          hasAnalysis={Boolean(analysis)}
+          hasAnalysis={Boolean(analysis) && screen !== "wellness" && screen !== "start"}
         />
       )}
 
       <main style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {screen === "home" && <HomeScreen onStart={() => (sessionId ? setScreen("wellness") : setScreen("start"))} />}
+        {screen === "home" && (
+          <HomeScreen
+            onStart={() => {
+              if (sessionId) {
+                setAnswers(Array(6).fill(null));
+                setAnalysis(null);
+                setVoiceResult(null);
+                setScreen("wellness");
+              } else {
+                setScreen("start");
+              }
+            }}
+          />
+        )}
 
         {screen === "start" && (
           <StartScreen
@@ -489,15 +557,48 @@ export default function App() {
         )}
 
         {screen === "analysis" && (
-          <AnalysisScreen
-            analysis={analysis}
-            answers={answers}
-            workload={workload}
-            voiceResult={voiceResult}
-            onNavigateToChat={() => setScreen("chat")}
-            onNavigateToMood={() => setScreen("mood")}
-            onOpenResearchModal={() => setIsResearchModalOpen(true)}
-            onNavigateToDoctors={() => setScreen("doctors")}
+          analysis ? (
+            <AnalysisScreen
+              analysis={analysis}
+              answers={answers}
+              workload={workload}
+              voiceResult={voiceResult}
+              onNavigateToChat={() => setScreen("chat")}
+              onNavigateToMood={() => setScreen("mood")}
+              onOpenResearchModal={() => setIsResearchModalOpen(true)}
+              onNavigateToDoctors={() => {
+                if (consultationProfile) {
+                  setScreen("doctors");
+                } else {
+                  setScreen("consultation-profile");
+                }
+              }}
+            />
+          ) : (
+            <WellnessScreen
+              answers={answers}
+              setAnswers={setAnswers}
+              onNext={handleSaveWellness}
+              onBack={() => setScreen("start")}
+              loading={loading}
+              error="Please complete your wellbeing check-in first."
+            />
+          )
+        )}
+
+        {screen === "consultation-profile" && (
+          <ConsultationProfileScreen
+            key={consultationProfile?.id || "consultation-profile"}
+            sessionId={sessionId}
+            initialData={consultationProfile}
+            defaultRole={role}
+            defaultUnit={unit}
+            onContinue={(profile) => {
+              setConsultationProfile(profile);
+              setScreenState("doctors");
+              sessionStorage.setItem(SCREEN_STORAGE_KEY, "doctors");
+            }}
+            onBack={() => setScreen(analysis ? "analysis" : "home")}
           />
         )}
 
@@ -505,6 +606,11 @@ export default function App() {
           <DoctorDirectoryScreen
             onSelectDoctor={handleSelectDoctor}
             onNavigateToAppointments={() => setScreen("appointments")}
+            consultationProfile={consultationProfile}
+            onEditProfile={() => {
+              setScreenState("consultation-profile");
+              sessionStorage.setItem(SCREEN_STORAGE_KEY, "consultation-profile");
+            }}
             onBack={() => setScreen(analysis ? "analysis" : "home")}
             hasAppointments={hasAppointments}
           />
@@ -514,6 +620,11 @@ export default function App() {
           <DoctorProfileScreen
             doctor={selectedDoctor}
             sessionId={sessionId}
+            consultationProfile={consultationProfile}
+            onEditProfile={() => {
+              setScreenState("consultation-profile");
+              sessionStorage.setItem(SCREEN_STORAGE_KEY, "consultation-profile");
+            }}
             onBookingSuccess={handleBookingSuccess}
             onBack={() => setScreen("doctors")}
           />

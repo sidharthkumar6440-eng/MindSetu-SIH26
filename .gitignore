@@ -43,6 +43,9 @@ backend/ml/data/
 .neon
 
 .env*
-
 # Local SQLite databases
 *.db
+
+# Archives
+*.zip
+
